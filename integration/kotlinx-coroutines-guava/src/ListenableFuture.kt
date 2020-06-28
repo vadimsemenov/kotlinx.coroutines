@@ -152,7 +152,8 @@ public fun <T> ListenableFuture<T>.asDeferred(): Deferred<T> {
     deferred.invokeOnCompletion {
         cancel(false)
     }
-    return deferred
+    // Return hides the CompletableDeferred. This should prevent casting.
+    return object : Deferred<T> by deferred {}
 }
 
 /**
