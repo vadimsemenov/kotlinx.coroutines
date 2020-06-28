@@ -48,6 +48,10 @@ public fun <T> CoroutineScope.future(
     val newContext = newCoroutineContext(context)
     val future = SettableFuture.create<T>()
     val coroutine = ListenableFutureCoroutine(newContext, future)
+    // TODO: listeners execution order isn't specified. It means that other listeners can defer
+    //  execution of this one (which cancels this coroutine). In practice, though, AbstractFuture tries to
+    //  execute listeners in order of their addition.
+    //  Consider moving this to AbstractFuture.afterDone().
     future.addListener(
       coroutine,
       MoreExecutors.directExecutor())
