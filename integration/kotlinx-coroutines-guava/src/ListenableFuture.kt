@@ -78,6 +78,17 @@ public fun <T> CoroutineScope.future(
  * cancellation to `this` `ListenableFuture`. Propagation will succeed, barring a race with the
  * `ListenableFuture` completing normally. This is the only case in which the returned `Deferred`
  * will complete with a different outcome than `this` `ListenableFuture`.
+ *
+ * Note: Cancellation of the coroutine that calls [await][Deferred.await] on the returned
+ * deferred, **does not** cancel [Deferred] and original [ListenableFuture].
+ * To propagate cancellation from awaiting coroutine to the [ListenableFuture], use [ListenableFuture.await].
+ *
+ * ```
+ * suspend fun foo() {
+ *   listenableFuture.asDeferred().await()  // Doesn't propagate `foo`'s cancellation to the `listenableFuture`
+ *   listenableFuture.await()  // Propagates `foo`'s cancellation to the `listenableFuture`
+ * }
+ * ```
  */
 public fun <T> ListenableFuture<T>.asDeferred(): Deferred<T> {
     /* This method creates very specific behaviour as it entangles the `Deferred` and
