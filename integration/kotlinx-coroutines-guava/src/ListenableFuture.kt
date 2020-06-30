@@ -349,10 +349,10 @@ private class ListenableFutureCoroutine<T>(
  *   - Fully correct cancellation and listener happens-after obeying [Future] and
  *     [ListenableFuture]'s documented and implicit contracts is surprisingly difficult to achieve.
  *     The best way to be correct, especially given the fun corner cases from
- *     [AsyncFuture.setAsync], is to just use an [AsyncFuture].
- *   - To maintain sanity, this class implements [ListenableFuture] and uses an inner [AsyncFuture]
+ *     [AbstractFuture.setFuture], is to just use an [AbstractFuture].
+ *   - To maintain sanity, this class implements [ListenableFuture] and uses an inner [AbstractFuture]
  *     around its input [deferred] as a state engine to establish happens-after-completion. This
- *     could probably be compressed into one subclass of [AsyncFuture] to save an allocation, at the
+ *     could probably be compressed into one subclass of [AbstractFuture] to save an allocation, at the
  *     cost of the implementation's readability.
  */
 private class OuterFuture<T>(private val deferred: Deferred<T>): ListenableFuture<T> {
