@@ -74,7 +74,7 @@ public fun <T> CoroutineScope.future(
  * When `this` `ListenableFuture` is [successfully cancelled][java.util.concurrent.Future.cancel],
  * it will cancel the returned `Deferred`.
  *
- * When the returned `Deferred` is [cancelled][Deferred.cancel()], it will try to propagate the
+ * When the returned `Deferred` is [cancelled][Deferred.cancel], it will try to propagate the
  * cancellation to `this` `ListenableFuture`. Propagation will succeed, barring a race with the
  * `ListenableFuture` completing normally. This is the only case in which the returned `Deferred`
  * will complete with a different outcome than `this` `ListenableFuture`.
