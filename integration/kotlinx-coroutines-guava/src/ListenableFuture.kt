@@ -465,6 +465,7 @@ private class InnerFuture<T>(
      * [OuterFuture] collaborates with this class to present a more cohesive picture and ensure
      * that certain combinations of cancelled/cancelling states can't be observed.
      */
+    @Suppress("UnstableApiUsage")
     override fun afterDone() {
         if (isCancelled) {
             jobToCancel.cancel()
