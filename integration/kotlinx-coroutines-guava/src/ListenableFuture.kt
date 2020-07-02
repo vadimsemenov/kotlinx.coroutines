@@ -215,8 +215,18 @@ private fun ExecutionException.nonNullCause(): Throwable {
  * corner cases of this method.
  */
 public fun <T> Deferred<T>.asListenableFuture(): ListenableFuture<T> {
-    val outerFuture = OuterFuture<T>(this)
-    outerFuture.afterInit()
+    val outerFuture = OuterFuture(this)
+    // This invokeOnCompletion completes the innerFuture as `deferred` does. The innerFuture may
+    // have completed earlier if it got cancelled! See InnerFuture.cancel.
+    invokeOnCompletion { throwable ->
+        outerFuture.complete(
+            result = if (throwable == null) {
+                Result.Success(getCompleted())
+            } else {
+                Result.Failure(throwable)
+            }
+        )
+    }
     return outerFuture
 }
 
@@ -350,29 +360,22 @@ private class ListenableFutureCoroutine<T>(
  *     The best way to be correct, especially given the fun corner cases from
  *     [AbstractFuture.setFuture], is to just use an [AbstractFuture].
  *   - To maintain sanity, this class implements [ListenableFuture] and uses an inner [AbstractFuture]
- *     around its input [deferred] as a state engine to establish happens-after-completion. This
+ *     around Deferred result as a state engine to establish happens-after-completion. This
  *     could probably be compressed into one subclass of [AbstractFuture] to save an allocation, at the
  *     cost of the implementation's readability.
  */
-private class OuterFuture<T>(private val deferred: Deferred<T>): ListenableFuture<T> {
-    val innerFuture = InnerFuture<Deferred<T>>(deferred)
+private class OuterFuture<T>(jobToCancel: Deferred<T>): ListenableFuture<T> {
+    private val innerFuture = InnerFuture<T>(jobToCancel)
 
-    // Adding the listener after initialization resolves partial construction hairpin problem.
-    //
-    // This invokeOnCompletion completes the innerFuture as `deferred`  does. The innerFuture may
-    // have completed earlier if it got cancelled! See DeferredListenableFuture.
-    fun afterInit() {
-        deferred.invokeOnCompletion {
-            innerFuture.complete(deferred)
-        }
-    }
+    /** Accepts [Result] of a coroutine. */
+    fun complete(result: Result<T>) = innerFuture.complete(result)
 
     /**
      * Returns cancellation _in the sense of [Future]_. This is _not_ equivalent to
      * [Job.isCancelled].
      *
-     * When done, this Future is cancelled if its innerFuture is cancelled, or if its delegate
-     * [deferred] is cancelled. Cancellation of [innerFuture] collaborates with this class.
+     * When done, this Future is cancelled if its innerFuture is cancelled, or if innerFuture
+     * contains [CancellationException]. Cancellation of [InnerFuture] collaborates with this class.
      *
      * See [InnerFuture.cancel].
      */
@@ -384,20 +387,20 @@ private class OuterFuture<T>(private val deferred: Deferred<T>): ListenableFutur
         // this Future hasn't itself been successfully cancelled, the Future will return
         // isCancelled() == false. This is the only discovered way to reconcile the two different
         // cancellation contracts.
-        return isDone
-          && (innerFuture.isCancelled
-          || deferred.getCompletionExceptionOrNull() is kotlinx.coroutines.CancellationException)
+        return isDone &&
+            (innerFuture.isCancelled || Uninterruptibles.getUninterruptibly(innerFuture).isCancelled)
     }
 
     /**
-     * Waits for [innerFuture] to complete by blocking, then uses the [deferred] returned by that
-     * Future to get the `T` value `this` [ListenableFuture] is pointing to. This establishes
-     * happens-after ordering for completion of the [Deferred] input to [OuterFuture].
+     * Waits for [innerFuture] to complete by blocking, then uses its [result][Result]
+     * to get the `T` value `this` [ListenableFuture] is pointing to. This establishes
+     * happens-after ordering for completion of the entangled coroutine.
+     *
+     * [InnerFuture.get] can only throw [CancellationException] if it was cancelled externally.
+     * Otherwise it returns [Result] that encapsulates outcome of the entangled coroutine.
      *
      * `innerFuture` _must be complete_ in order for the [isDone] and [isCancelled] happens-after
-     * contract of [Future] to be correctly followed. If this method were to directly use
-     * _`this.deferred`_ instead of blocking on its `innerFuture`, the [Deferred] that this
-     * [ListenableFuture] is created from might be in an incomplete state when used by `get()`.
+     * contract of [Future] to be correctly followed.
      */
     override fun get(): T {
         return getInternal(innerFuture.get())
@@ -409,17 +412,9 @@ private class OuterFuture<T>(private val deferred: Deferred<T>): ListenableFutur
     }
 
     /** See [get()]. */
-    private fun getInternal(deferred: Deferred<T>): T {
-        if (deferred.isCancelled) {
-            val exception = deferred.getCompletionExceptionOrNull()
-            if (exception is kotlinx.coroutines.CancellationException) {
-                throw exception
-            } else {
-                throw ExecutionException(exception)
-            }
-        } else {
-            return deferred.getCompleted()
-        }
+    private fun getInternal(result: Result<T>): T = when(result) {
+        is Result.Success -> result.value
+        is Result.Failure -> throw result.asFutureException()
     }
 
     override fun addListener(listener: Runnable, executor: Executor) {
@@ -447,11 +442,15 @@ private class OuterFuture<T>(private val deferred: Deferred<T>): ListenableFutur
  */
 private class InnerFuture<T>(
     private val jobToCancel: Job
-) : AbstractFuture<T>() {
+) : AbstractFuture<Result<T>>() {
 
-    fun complete(result: T) {
-        set(result)
-    }
+    /**
+     * When entangled coroutine [completes][Job.isCompleted] (either successfully or exceptionally),
+     * its [Result] should be passed to this method.
+     *
+     * This should succeed barring a race with external cancellation.
+     */
+    fun complete(result: Result<T>) = set(result)
 
     /**
      * Tries to cancel [jobToCancel] if `this` future was cancelled. This is fundamentally racy.
@@ -472,3 +471,23 @@ private class InnerFuture<T>(
         }
     }
 }
+
+/** Represents result of a `Coroutine` (either [Deferred] or [AbstractCoroutine]). */
+// This is similar to kotlin.Result type. However, kotlin.Result can't be used by external libraries.
+private sealed class Result<out T> {
+    class Success<T>(val value: T) : Result<T>()
+    class Failure<T>(val throwable: Throwable) : Result<T>()
+}
+
+/**
+ * Returns cancellation _in the sense of [Future]_. This is _not_ equivalent to [Job.isCancelled].
+ */
+private val Result<*>.isCancelled get() =
+    this is Result.Failure && throwable is CancellationException
+
+/**
+ * Transforms exception in a `Coroutine` (which can by represented as [Deferred]) into
+ * exception that can be thrown by [Future.get].
+ */
+private fun Result.Failure<*>.asFutureException(): Exception =
+    if (throwable is CancellationException) throwable else ExecutionException(throwable)
