@@ -271,8 +271,7 @@ private class ToContinuation<T>(
             continuation.cancel()
         } else {
             try {
-                continuation.resumeWith(
-                  Result.success(Uninterruptibles.getUninterruptibly(futureToObserve)))
+                continuation.resume(Uninterruptibles.getUninterruptibly(futureToObserve))
             } catch (e: ExecutionException) {
                 // ExecutionException is the only kind of exception that can be thrown from a gotten
                 // Future. Anything else showing up here indicates a very fundamental bug in a
