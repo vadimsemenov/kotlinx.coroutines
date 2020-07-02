@@ -7,7 +7,6 @@ package kotlinx.coroutines.guava
 import com.google.common.util.concurrent.*
 import kotlinx.coroutines.*
 import org.junit.*
-import org.junit.Ignore
 import org.junit.Test
 import java.util.concurrent.*
 import java.util.concurrent.CancellationException
@@ -316,7 +315,6 @@ class ListenableFutureTest : TestBase() {
         finish(4)
     }
 
-    @Ignore
     @Test
     fun testAsListenableFuturePropagatesCancellationBeforeRunningListeners() = runTest {
         expect(1)

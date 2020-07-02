@@ -454,7 +454,7 @@ private class InnerFuture<T>(
     }
 
     /**
-     * Tries to cancel the task. This is fundamentally racy.
+     * Tries to cancel [jobToCancel] if `this` future was cancelled. This is fundamentally racy.
      *
      * The call to `cancel()` will try to cancel this Future: if and only if cancellation of this
      * succeeds, [jobToCancel] will have its [Job.cancel] called.
@@ -466,12 +466,9 @@ private class InnerFuture<T>(
      * [OuterFuture] collaborates with this class to present a more cohesive picture and ensure
      * that certain combinations of cancelled/cancelling states can't be observed.
      */
-    override fun cancel(mayInterruptIfRunning: Boolean): Boolean {
-        return if (super.cancel(mayInterruptIfRunning)) {
+    override fun afterDone() {
+        if (isCancelled) {
             jobToCancel.cancel()
-            true
-        } else {
-            false
         }
     }
 }
