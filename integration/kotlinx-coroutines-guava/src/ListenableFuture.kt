@@ -17,8 +17,10 @@ import kotlin.coroutines.*
  * The coroutine is immediately started. Passing [CoroutineStart.LAZY] to [start] throws
  * [IllegalArgumentException], because Futures don't have a way to start lazily.
  *
- * The created coroutine is cancelled when the resulting future completes successfully, fails, or
- * is cancelled.
+ * When the created coroutine completes (either successfully or exceptionally), it will try to
+ * *synchronously* complete the returned Future with the same outcome.
+ *
+ * Cancellation is propagated bidirectionally.
  *
  * `CoroutineContext` is inherited from this [CoroutineScope]. Additional context elements can be
  * added/overlaid by passing [context].
@@ -33,7 +35,10 @@ import kotlin.coroutines.*
  * facilities.
  *
  * Note that the error and cancellation semantics of [future] are _subtly different_ than
- * [asListenableFuture]'s. See [ListenableFutureCoroutine] for details.
+ * [asListenableFuture]'s.
+ * In particular, any exception that happens in the coroutine after returned future is
+ * successfully cancelled will be passed to the [CoroutineExceptionHandler] from the [context].
+ * See [ListenableFutureCoroutine] for details.
  *
  * @param context added overlaying [CoroutineScope.coroutineContext] to form the new context.
  * @param start coroutine start option. The default value is [CoroutineStart.DEFAULT].
@@ -46,18 +51,9 @@ public fun <T> CoroutineScope.future(
 ): ListenableFuture<T> {
     require(!start.isLazy) { "$start start is not supported" }
     val newContext = newCoroutineContext(context)
-    val future = SettableFuture.create<T>()
-    val coroutine = ListenableFutureCoroutine(newContext, future)
-    // TODO: listeners execution order isn't specified. It means that other listeners can defer
-    //  execution of this one (which cancels this coroutine). In practice, though, AbstractFuture tries to
-    //  execute listeners in order of their addition.
-    //  Consider moving this to AbstractFuture.afterDone().
-    future.addListener(
-      coroutine,
-      MoreExecutors.directExecutor())
+    val coroutine = ListenableFutureCoroutine<T>(newContext)
     coroutine.start(start, coroutine, block)
-    // Return hides the SettableFuture. This should prevent casting.
-    return object: ListenableFuture<T> by future {}
+    return coroutine.future
 }
 
 /**
@@ -215,7 +211,7 @@ private fun ExecutionException.nonNullCause(): Throwable {
  * corner cases of this method.
  */
 public fun <T> Deferred<T>.asListenableFuture(): ListenableFuture<T> {
-    val outerFuture = OuterFuture(this)
+    val outerFuture = OuterFuture<T>(this)
     // This invokeOnCompletion completes the innerFuture as `deferred` does. The innerFuture may
     // have completed earlier if it got cancelled! See InnerFuture.cancel.
     invokeOnCompletion { throwable ->
@@ -296,49 +292,39 @@ private class ToContinuation<T>(
  * An [AbstractCoroutine] intended for use directly creating a [ListenableFuture] handle to
  * completion.
  *
- * The code in the [Runnable] portion of the class is registered as a [ListenableFuture] callback.
- * See [run] for details. Both types are implemented by this object to save an allocation.
+ * If [future] is successfully cancelled, cancellation is propagated to `this` `Coroutine`.
+ * By documented contract, a [Future] has been cancelled if
+ * and only if its `isCancelled()` method returns true.
+ *
+ * Any error that occurs after successfully cancelling a [ListenableFuture] will be passed
+ * to the [CoroutineExceptionHandler] from the context. The contract of [Future] does not permit
+ * it to return an error after it is successfully cancelled.
+ *
+ * By calling [asListenableFuture] on a [Deferred], any error that occurs after successfully
+ * cancelling the [ListenableFuture] representation of the [Deferred] will _not_ be passed to
+ * the [CoroutineExceptionHandler]. Cancelling a [Deferred] places that [Deferred] in the
+ * cancelling/cancelled states defined by [Job], which _can_ show the error. It's assumed that
+ * the [Deferred] pointing to the task will be used to observe any error outcome occurring after
+ * cancellation.
+ *
+ * This may be counterintuitive, but it maintains the error and cancellation contracts of both
+ * the [Deferred] and [ListenableFuture] types, while permitting both kinds of promise to point
+ * to the same running task.
  */
 private class ListenableFutureCoroutine<T>(
-    context: CoroutineContext,
-    private val future: SettableFuture<T>
-) : AbstractCoroutine<T>(context), Runnable  {
+    context: CoroutineContext
+) : AbstractCoroutine<T>(context) {
 
-    /**
-     * When registered as a [ListenableFuture] listener, cancels the returned `Coroutine` if
-     * [future] is successfully cancelled. By documented contract, a [Future] has been cancelled if
-     * and only if its `isCancelled()` method returns true.
-     *
-     * Any error that occurs after successfully cancelling a [ListenableFuture]
-     * created by submitting the returned object as a [Runnable] to an `Executor` will be passed
-     * to the [CoroutineExceptionHandler] from the context. The contract of [Future] does not permit
-     * it to return an error after it is successfully cancelled.
-     *
-     * By calling [asListenableFuture] on a [Deferred], any error that occurs after successfully
-     * cancelling the [ListenableFuture] representation of the [Deferred] will _not_ be passed to
-     * the [CoroutineExceptionHandler]. Cancelling a [Deferred] places that [Deferred] in the
-     * cancelling/cancelled states defined by [Job], which _can_ show the error. It's assumed that
-     * the [Deferred] pointing to the task will be used to observe any error outcome occurring after
-     * cancellation.
-     *
-     * This may be counterintuitive, but it maintains the error and cancellation contracts of both
-     * the [Deferred] and [ListenableFuture] types, while permitting both kinds of promise to point
-     * to the same running task.
-     */
-    override fun run() {
-        if (future.isCancelled) {
-            cancel()
-        }
-    }
+    // OuterFuture propagates external cancellation to `this` coroutine. See OuterFuture.
+    val future = OuterFuture<T>(this)
 
     override fun onCompleted(value: T) {
-        future.set(value)
+        future.complete(Result.Success(value))
     }
 
-    // TODO: This doesn't actually cancel the Future. There doesn't seem to be bidi cancellation?
     override fun onCancelled(cause: Throwable, handled: Boolean) {
-        if (!future.setException(cause) && !handled) {
-            // prevents loss of exception that was not handled by parent & could not be set to SettableFuture
+        if (!future.complete(Result.Failure(cause)) && !handled) {
+            // prevents loss of exception that was not handled by parent & could not be set to OuterFuture
             handleCoroutineException(context, cause)
         }
     }
@@ -364,7 +350,7 @@ private class ListenableFutureCoroutine<T>(
  *     could probably be compressed into one subclass of [AbstractFuture] to save an allocation, at the
  *     cost of the implementation's readability.
  */
-private class OuterFuture<T>(jobToCancel: Deferred<T>): ListenableFuture<T> {
+private class OuterFuture<T>(jobToCancel: Job): ListenableFuture<T> {
     private val innerFuture = InnerFuture<T>(jobToCancel)
 
     /** Accepts [Result] of a coroutine. */

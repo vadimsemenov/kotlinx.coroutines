@@ -584,12 +584,11 @@ class ListenableFutureTest : TestBase() {
         supervisorJob.cancel(CancellationException("Parent cancelled", TestException()))
         supervisorJob.join()
         assertTrue(future.isDone)
-        // TODO: uncomment these line when future cancellation is propagated bidirectionally.
-//        assertTrue(future.isCancelled)
-//        assertFailsWith<CancellationException> { future.get() }.run {
-//            assertEquals("Parent cancelled", message)
-//            assertTrue(cause is TestException)
-//        }
+        assertTrue(future.isCancelled)
+        assertFailsWith<CancellationException> { future.get() }.run {
+            assertEquals("Parent cancelled", message)
+            assertTrue(cause is TestException)
+        }
         finish(5)
     }
 
