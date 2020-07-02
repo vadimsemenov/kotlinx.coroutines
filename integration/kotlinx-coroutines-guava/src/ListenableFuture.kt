@@ -295,7 +295,7 @@ private class ListenableFutureCoroutine<T>(
 ) : AbstractCoroutine<T>(context), Runnable  {
 
     /**
-     * When registered as a [ListenableFuture] listener, cancels the returned [Coroutine] if
+     * When registered as a [ListenableFuture] listener, cancels the returned `Coroutine` if
      * [future] is successfully cancelled. By documented contract, a [Future] has been cancelled if
      * and only if its `isCancelled()` method returns true.
      *
