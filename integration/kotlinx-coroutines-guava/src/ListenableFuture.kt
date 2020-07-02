@@ -211,7 +211,7 @@ private fun ExecutionException.nonNullCause(): Throwable {
  *
  * This is inherently a race. See [Future.cancel] for a description of `Future` cancellation
  * semantics. See [Job] for a description of coroutine cancellation semantics. See
- * [DeferredListenableFuture.cancel] for greater detail on the overlapped cancellation semantics and
+ * [InnerFuture.cancel] for greater detail on the overlapped cancellation semantics and
  * corner cases of this method.
  */
 public fun <T> Deferred<T>.asListenableFuture(): ListenableFuture<T> {
@@ -335,7 +335,7 @@ private class ListenableFutureCoroutine<T>(
 }
 
 /**
- * A [ListenableFuture] that delegates to an internal [DeferredListenableFuture], collaborating with
+ * A [ListenableFuture] that delegates to an internal [InnerFuture], collaborating with
  * it.
  *
  * This setup allows the returned [ListenableFuture] to maintain the following properties:
@@ -355,7 +355,7 @@ private class ListenableFutureCoroutine<T>(
  *     cost of the implementation's readability.
  */
 private class OuterFuture<T>(private val deferred: Deferred<T>): ListenableFuture<T> {
-    val innerFuture = DeferredListenableFuture(deferred)
+    val innerFuture = InnerFuture<Deferred<T>>(deferred)
 
     // Adding the listener after initialization resolves partial construction hairpin problem.
     //
@@ -363,7 +363,7 @@ private class OuterFuture<T>(private val deferred: Deferred<T>): ListenableFutur
     // have completed earlier if it got cancelled! See DeferredListenableFuture.
     fun afterInit() {
         deferred.invokeOnCompletion {
-            innerFuture.complete()
+            innerFuture.complete(deferred)
         }
     }
 
@@ -374,7 +374,7 @@ private class OuterFuture<T>(private val deferred: Deferred<T>): ListenableFutur
      * When done, this Future is cancelled if its innerFuture is cancelled, or if its delegate
      * [deferred] is cancelled. Cancellation of [innerFuture] collaborates with this class.
      *
-     * See [DeferredListenableFuture.cancel].
+     * See [InnerFuture.cancel].
      */
     override fun isCancelled(): Boolean {
         // This expression ensures that isCancelled() will *never* return true when isDone() returns false.
@@ -436,31 +436,31 @@ private class OuterFuture<T>(private val deferred: Deferred<T>): ListenableFutur
 }
 
 /**
- * Holds a delegate deferred, and serves as a state machine for [Future] cancellation.
+ * Serves as a state machine for [Future] cancellation.
+ *
+ * If this future gets [cancelled][Future.cancel], [jobToCancel] will be [cancelled][Job.cancel] as well.
  *
  * [AbstractFuture] has a highly-correct atomic implementation of `Future`'s completion and
  * cancellation semantics. By using that type, the [OuterFuture] can delegate its semantics to
  * _this_ `Future` `get()` the result in such a way that the `Deferred` is always complete when
  * returned.
  */
-private class DeferredListenableFuture<T>(
-    private val deferred: Deferred<T>
-) : AbstractFuture<Deferred<T>>() {
+private class InnerFuture<T>(
+    private val jobToCancel: Job
+) : AbstractFuture<T>() {
 
-    fun complete() {
-        set(deferred)
+    fun complete(result: T) {
+        set(result)
     }
 
     /**
      * Tries to cancel the task. This is fundamentally racy.
      *
-     * For any given call to `cancel()`, if [deferred] is already completed, the call will complete
-     * this Future with it, and fail to cancel. Otherwise, the
-     * call to `cancel()` will try to cancel this Future: if and only if cancellation of this
-     * succeeds, [deferred] will have its [Deferred.cancel] called.
+     * The call to `cancel()` will try to cancel this Future: if and only if cancellation of this
+     * succeeds, [jobToCancel] will have its [Job.cancel] called.
      *
-     * This arrangement means that [deferred] _might not successfully cancel_, if the race resolves
-     * in a particular way. [deferred] may also be in its "cancelling" state while this
+     * This arrangement means that [jobToCancel] _might not successfully cancel_, if the race resolves
+     * in a particular way. [jobToCancel] may also be in its "cancelling" state while this
      * ListenableFuture is complete and cancelled.
      *
      * [OuterFuture] collaborates with this class to present a more cohesive picture and ensure
@@ -468,7 +468,7 @@ private class DeferredListenableFuture<T>(
      */
     override fun cancel(mayInterruptIfRunning: Boolean): Boolean {
         return if (super.cancel(mayInterruptIfRunning)) {
-            deferred.cancel()
+            jobToCancel.cancel()
             true
         } else {
             false
