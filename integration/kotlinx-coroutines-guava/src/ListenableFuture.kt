@@ -216,11 +216,7 @@ public fun <T> Deferred<T>.asListenableFuture(): ListenableFuture<T> {
     // have completed earlier if it got cancelled! See InnerFuture.cancel.
     invokeOnCompletion { throwable ->
         outerFuture.complete(
-            result = if (throwable == null) {
-                Result.Success(getCompleted())
-            } else {
-                Result.Failure(throwable)
-            }
+            result = throwable?.asResult() ?: Result.Success(getCompleted())
         )
     }
     return outerFuture
@@ -323,7 +319,7 @@ private class ListenableFutureCoroutine<T>(
     }
 
     override fun onCancelled(cause: Throwable, handled: Boolean) {
-        if (!future.complete(Result.Failure(cause)) && !handled) {
+        if (!future.complete(cause.asResult()) && !handled) {
             // prevents loss of exception that was not handled by parent & could not be set to OuterFuture
             handleCoroutineException(context, cause)
         }
@@ -400,7 +396,7 @@ private class OuterFuture<T>(jobToCancel: Job): ListenableFuture<T> {
     /** See [get()]. */
     private fun getInternal(result: Result<T>): T = when(result) {
         is Result.Success -> result.value
-        is Result.Failure -> throw result.asFutureException()
+        is Result.Failure -> throw result.exception
     }
 
     override fun addListener(listener: Runnable, executor: Executor) {
@@ -458,22 +454,31 @@ private class InnerFuture<T>(
     }
 }
 
-/** Represents result of a `Coroutine` (either [Deferred] or [AbstractCoroutine]). */
-// This is similar to kotlin.Result type. However, kotlin.Result can't be used by external libraries.
+/**
+ * Represents result of a `Coroutine` in the sense of [Future].
+ *
+ * - When coroutine [isCompleted][Job.isCompleted] successfully, its result is wrapped into [Success].
+ * - When coroutine [isCompleted][Job.isCompleted] exceptionally, meaning [isCancelled]
+ *   returns `true`, the result is represented by [Failure] state. According to [Future]'s contract,
+ *   [Failure.exception] can be of two types:
+ *     - [CancellationException] if the coroutine was _cancelled normally_, meaning it threw [CancellationException].
+ *     - [ExecutionException] with the original [Throwable] in its [cause][ExecutionException.cause] otherwise.
+ */
 private sealed class Result<out T> {
+    /** Returns cancellation _in the sense of [Future]_. This is _not_ equivalent to [Job.isCancelled] */
+    open val isCancelled get() = false
+
     class Success<T>(val value: T) : Result<T>()
-    class Failure<T>(val throwable: Throwable) : Result<T>()
+    class Failure<T>(val exception: Exception) : Result<T>() {
+        override val isCancelled: Boolean get() = exception is CancellationException
+    }
 }
 
 /**
- * Returns cancellation _in the sense of [Future]_. This is _not_ equivalent to [Job.isCancelled].
+ * Wraps exception in a `Coroutine` into [Result.Failure]. [Result.Failure.exception] represents `this`
+ * exception in the sense of [Future].
  */
-private val Result<*>.isCancelled get() =
-    this is Result.Failure && throwable is CancellationException
-
-/**
- * Transforms exception in a `Coroutine` (which can by represented as [Deferred]) into
- * exception that can be thrown by [Future.get].
- */
-private fun Result.Failure<*>.asFutureException(): Exception =
-    if (throwable is CancellationException) throwable else ExecutionException(throwable)
+private fun <T> Throwable.asResult() = Result.Failure<T>(
+    if (this is CancellationException) this
+    else ExecutionException(this)
+)
