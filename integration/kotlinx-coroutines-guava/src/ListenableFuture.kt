@@ -17,8 +17,9 @@ import kotlin.coroutines.*
  * The coroutine is immediately started. Passing [CoroutineStart.LAZY] to [start] throws
  * [IllegalArgumentException], because Futures don't have a way to start lazily.
  *
- * When the created coroutine completes (either successfully or exceptionally), it will try to
- * *synchronously* complete the returned Future with the same outcome.
+ * When the created coroutine [isCompleted][Job.isCompleted], it will try to
+ * *synchronously* complete the returned Future with the same outcome. This will
+ * succeed, barring a race with external cancellation of returned [ListenableFuture].
  *
  * Cancellation is propagated bidirectionally.
  *
@@ -34,8 +35,7 @@ import kotlin.coroutines.*
  * See [newCoroutineContext][CoroutineScope.newCoroutineContext] for a description of debugging
  * facilities.
  *
- * Note that the error and cancellation semantics of [future] are _subtly different_ than
- * [asListenableFuture]'s.
+ * Note that the error and cancellation semantics of [future] are _subtly different_ than [asListenableFuture]'s.
  * In particular, any exception that happens in the coroutine after returned future is
  * successfully cancelled will be passed to the [CoroutineExceptionHandler] from the [context].
  * See [ListenableFutureCoroutine] for details.
@@ -80,9 +80,9 @@ public fun <T> CoroutineScope.future(
  * To propagate cancellation from awaiting coroutine to the [ListenableFuture], use [ListenableFuture.await].
  *
  * ```
- * suspend fun foo() {
- *   listenableFuture.asDeferred().await()  // Doesn't propagate `foo`'s cancellation to the `listenableFuture`
- *   listenableFuture.await()  // Propagates `foo`'s cancellation to the `listenableFuture`
+ * val job = coroutineScope.launch {
+ *   listenableFuture.asDeferred().await()  // Doesn't propagate `job`'s cancellation to the `listenableFuture`
+ *   listenableFuture.await()  // Propagates `job`'s cancellation to the `listenableFuture`
  * }
  * ```
  */
@@ -431,8 +431,7 @@ private class InnerFuture<T>(
 ) : AbstractFuture<Result<T>>() {
 
     /**
-     * When entangled coroutine [completes][Job.isCompleted] (either successfully or exceptionally),
-     * its [Result] should be passed to this method.
+     * When the attached coroutine [isCompleted][Job.isCompleted], its [Result] should be passed to this method.
      *
      * This should succeed barring a race with external cancellation.
      */

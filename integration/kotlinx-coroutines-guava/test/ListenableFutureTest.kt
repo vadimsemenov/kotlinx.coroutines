@@ -570,7 +570,7 @@ class ListenableFutureTest : TestBase() {
     }
 
     @Test
-    fun testFutureScopeCancellationPropagatedAlong() = runTest {
+    fun testCancellingFutureContextJobCancelsFuture() = runTest {
         expect(1)
         val supervisorJob = SupervisorJob()
         val future = future(context = supervisorJob) {
@@ -589,10 +589,9 @@ class ListenableFutureTest : TestBase() {
         supervisorJob.join()
         assertTrue(future.isDone)
         assertTrue(future.isCancelled)
-        assertFailsWith<CancellationException> { future.get() }.run {
-            assertEquals("Parent cancelled", message)
-            assertTrue(cause is TestException)
-        }
+        val thrown = assertFailsWith<CancellationException> { future.get() }
+        assertEquals("Parent cancelled", thrown.message)
+        assertTrue(thrown.cause is TestException)
         finish(5)
     }
 
@@ -609,6 +608,7 @@ class ListenableFutureTest : TestBase() {
     @Test
     fun testFutureIsDoneAfterChildrenCompleted() = runTest {
         expect(1)
+        val testException = TestException()
         // Don't propagate exception to the test and use different dispatchers as we are going to block test thread.
         val future = future(context = NonCancellable + Dispatchers.Default) {
             val foo = async {
@@ -624,16 +624,15 @@ class ListenableFutureTest : TestBase() {
             foo.invokeOnCompletion {
                 expect(3)
             }
-            val bar = async<Int> { throw TestException() }
+            val bar = async<Int> { throw testException }
             foo.await() + bar.await()
         }
         yield()
         expect(2)
         // Blocking get should succeed after internal coroutine completes.
-        assertFailsWith<ExecutionException> { future.get() }.run {
-            expect(4)
-            assertTrue(cause is TestException)
-        }
+        val thrown = assertFailsWith<ExecutionException> { future.get() }
+        expect(4)
+        assertEquals(testException, thrown.cause)
         finish(5)
     }
 
