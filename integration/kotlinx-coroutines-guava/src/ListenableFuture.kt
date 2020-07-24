@@ -207,7 +207,7 @@ private fun ExecutionException.nonNullCause(): Throwable {
  *
  * This is inherently a race. See [Future.cancel] for a description of `Future` cancellation
  * semantics. See [Job] for a description of coroutine cancellation semantics. See
- * [InnerFuture.cancel] for greater detail on the overlapped cancellation semantics and
+ * [OuterFuture.cancel] for greater detail on the overlapped cancellation semantics and
  * corner cases of this method.
  */
 public fun <T> Deferred<T>.asListenableFuture(): ListenableFuture<T> {
@@ -327,8 +327,7 @@ private class ListenableFutureCoroutine<T>(
 }
 
 /**
- * A [ListenableFuture] that delegates to an internal [InnerFuture], collaborating with
- * it.
+ * A [ListenableFuture] that delegates to an internal [SettableFuture], collaborating with it.
  *
  * This setup allows the returned [ListenableFuture] to maintain the following properties:
  *
@@ -341,25 +340,36 @@ private class ListenableFutureCoroutine<T>(
  *     [ListenableFuture]'s documented and implicit contracts is surprisingly difficult to achieve.
  *     The best way to be correct, especially given the fun corner cases from
  *     [AbstractFuture.setFuture], is to just use an [AbstractFuture].
- *   - To maintain sanity, this class implements [ListenableFuture] and uses an inner [AbstractFuture]
+ *   - To maintain sanity, this class implements [ListenableFuture] and uses an inner [SettableFuture]
  *     around Deferred result as a state engine to establish happens-after-completion. This
  *     could probably be compressed into one subclass of [AbstractFuture] to save an allocation, at the
  *     cost of the implementation's readability.
  */
-private class OuterFuture<T>(jobToCancel: Job): ListenableFuture<T> {
-    private val innerFuture = InnerFuture<T>(jobToCancel)
+private class OuterFuture<T>(private val jobToCancel: Job): ListenableFuture<T> {
+    /**
+     * Serves as a state machine for [Future] cancellation.
+     *
+     * [AbstractFuture] has a highly-correct atomic implementation of `Future`'s completion and
+     * cancellation semantics. By using that type, the [OuterFuture] can delegate its semantics to
+     * `innerFuture.get()` the result in such a way that the `Deferred` is always complete when returned.
+     */
+    private val innerFuture = SettableFuture.create<Result<T>>()
 
-    /** Accepts [Result] of a coroutine. */
-    fun complete(result: Result<T>) = innerFuture.complete(result)
+    /**
+     * When the attached coroutine [isCompleted][Job.isCompleted], its [Result] should be passed to this method.
+     *
+     * This should succeed barring a race with external cancellation.
+     */
+    fun complete(result: Result<T>) = innerFuture.set(result)
 
     /**
      * Returns cancellation _in the sense of [Future]_. This is _not_ equivalent to
      * [Job.isCancelled].
      *
-     * When done, this Future is cancelled if its innerFuture is cancelled, or if innerFuture
-     * contains [CancellationException]. Cancellation of [InnerFuture] collaborates with this class.
+     * When done, this Future is cancelled if its [innerFuture] is cancelled, or if [innerFuture]
+     * contains [CancellationException].
      *
-     * See [InnerFuture.cancel].
+     * See [cancel].
      */
     override fun isCancelled(): Boolean {
         // This expression ensures that isCancelled() will *never* return true when isDone() returns false.
@@ -378,10 +388,10 @@ private class OuterFuture<T>(jobToCancel: Job): ListenableFuture<T> {
      * to get the `T` value `this` [ListenableFuture] is pointing to. This establishes
      * happens-after ordering for completion of the entangled coroutine.
      *
-     * [InnerFuture.get] can only throw [CancellationException] if it was cancelled externally.
+     * [SettableFuture.get] can only throw [CancellationException] if it was cancelled externally.
      * Otherwise it returns [Result] that encapsulates outcome of the entangled coroutine.
      *
-     * `innerFuture` _must be complete_ in order for the [isDone] and [isCancelled] happens-after
+     * [innerFuture] _must be complete_ in order for the [isDone] and [isCancelled] happens-after
      * contract of [Future] to be correctly followed.
      */
     override fun get(): T {
@@ -407,49 +417,25 @@ private class OuterFuture<T>(jobToCancel: Job): ListenableFuture<T> {
         return innerFuture.isDone
     }
 
-    override fun cancel(mayInterruptIfRunning: Boolean): Boolean {
-        return innerFuture.cancel(mayInterruptIfRunning)
-    }
-}
-
-/**
- * Serves as a state machine for [Future] cancellation.
- *
- * If this future gets [cancelled][Future.cancel], [jobToCancel] will be [cancelled][Job.cancel] as well.
- *
- * [AbstractFuture] has a highly-correct atomic implementation of `Future`'s completion and
- * cancellation semantics. By using that type, the [OuterFuture] can delegate its semantics to
- * _this_ `Future` `get()` the result in such a way that the `Deferred` is always complete when
- * returned.
- */
-private class InnerFuture<T>(
-    private val jobToCancel: Job
-) : AbstractFuture<Result<T>>() {
-
-    /**
-     * When the attached coroutine [isCompleted][Job.isCompleted], its [Result] should be passed to this method.
-     *
-     * This should succeed barring a race with external cancellation.
-     */
-    fun complete(result: Result<T>) = set(result)
-
     /**
      * Tries to cancel [jobToCancel] if `this` future was cancelled. This is fundamentally racy.
      *
-     * The call to `cancel()` will try to cancel this Future: if and only if cancellation of this
+     * The call to `cancel()` will try to cancel [innerFuture]: if and only if cancellation of [innerFuture]
      * succeeds, [jobToCancel] will have its [Job.cancel] called.
      *
      * This arrangement means that [jobToCancel] _might not successfully cancel_, if the race resolves
      * in a particular way. [jobToCancel] may also be in its "cancelling" state while this
      * ListenableFuture is complete and cancelled.
-     *
-     * [OuterFuture] collaborates with this class to present a more cohesive picture and ensure
-     * that certain combinations of cancelled/cancelling states can't be observed.
      */
-    @Suppress("UnstableApiUsage")
-    override fun afterDone() {
-        if (isCancelled) {
+    override fun cancel(mayInterruptIfRunning: Boolean): Boolean {
+        // TODO: call jobToCancel.cancel() _before_ running the listeners.
+        //  Future.cancel may execute all the listeners which can delay cancellation of jobToCancel.
+        //  Consider moving `jobToCancel.cancel()` into [AbstractFuture.afterDone] when the API is finalized.
+        return if (innerFuture.cancel(mayInterruptIfRunning)) {
             jobToCancel.cancel()
+            true
+        } else {
+            false
         }
     }
 }
