@@ -74,17 +74,6 @@ public fun <T> CoroutineScope.future(
  * cancellation to `this` `ListenableFuture`. Propagation will succeed, barring a race with the
  * `ListenableFuture` completing normally. This is the only case in which the returned `Deferred`
  * will complete with a different outcome than `this` `ListenableFuture`.
- *
- * Note: Cancellation of the coroutine that calls [await][Deferred.await] on the returned
- * deferred, **does not** cancel [Deferred] and original [ListenableFuture].
- * To propagate cancellation from awaiting coroutine to the [ListenableFuture], use [ListenableFuture.await].
- *
- * ```
- * val job = coroutineScope.launch {
- *   listenableFuture.asDeferred().await()  // Doesn't propagate `job`'s cancellation to the `listenableFuture`
- *   listenableFuture.await()  // Propagates `job`'s cancellation to the `listenableFuture`
- * }
- * ```
  */
 public fun <T> ListenableFuture<T>.asDeferred(): Deferred<T> {
     /* This method creates very specific behaviour as it entangles the `Deferred` and
@@ -233,7 +222,6 @@ public fun <T> Deferred<T>.asListenableFuture(): ListenableFuture<T> {
  * This method is intended to be used with one-shot Futures, so on coroutine cancellation, the Future is cancelled as well.
  * If cancelling the given future is undesired, use [Futures.nonCancellationPropagating] or
  * [kotlinx.coroutines.NonCancellable].
- *
  */
 public suspend fun <T> ListenableFuture<T>.await(): T {
     try {
