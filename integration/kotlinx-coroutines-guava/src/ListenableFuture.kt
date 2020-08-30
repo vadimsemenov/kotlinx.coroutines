@@ -367,8 +367,7 @@ private class JobListenableFuture<T>(private val jobToCancel: Job): ListenableFu
         // this Future hasn't itself been successfully cancelled, the Future will return
         // isCancelled() == false. This is the only discovered way to reconcile the two different
         // cancellation contracts.
-        return isDone &&
-            (auxFuture.isCancelled || Uninterruptibles.getUninterruptibly(auxFuture).isCancelled)
+        return auxFuture.isCancelled || (isDone && Uninterruptibles.getUninterruptibly(auxFuture).isCancelled)
     }
 
     /**
