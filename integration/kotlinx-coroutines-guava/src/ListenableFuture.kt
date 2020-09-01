@@ -442,6 +442,29 @@ private class JobListenableFuture<T>(private val jobToCancel: Job): ListenableFu
             false
         }
     }
+
+    override fun toString(): String = buildString {
+        append(super.toString())
+        append("[status=")
+        if (isDone) {
+            try {
+                when (val result = Uninterruptibles.getUninterruptibly(auxFuture)) {
+                    is Result.Success -> append("SUCCESS, result=[${result.value}")
+                    is Result.Cancellation -> append("CANCELLED, cause=[${result.exception}]")
+                }
+            } catch (e: CancellationException) {
+                // `this` future was cancelled by `Future.cancel`. In this case there's no cause or message.
+                append("CANCELLED")
+            } catch (e: ExecutionException) {
+                append("FAILURE, cause=[${e.cause}]")
+            } catch (t: Throwable) {
+                // Violation of Future's contract, should never happen.
+                append("UNKNOWN, cause=[${t.javaClass} thrown from get()]")
+            }
+        } else {
+            append("PENDING, delegate=[$auxFuture]")
+        }
+    }
 }
 
 /**
