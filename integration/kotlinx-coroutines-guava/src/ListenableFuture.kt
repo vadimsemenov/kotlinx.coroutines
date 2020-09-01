@@ -204,9 +204,11 @@ public fun <T> Deferred<T>.asListenableFuture(): ListenableFuture<T> {
     // This invokeOnCompletion completes the JobListenableFuture with the same result as `this` Deferred.
     // The JobListenableFuture may have completed earlier if it got cancelled! See JobListenableFuture.cancel().
     invokeOnCompletion { throwable ->
-        listenableFuture.complete(
-            result = throwable?.asResult() ?: Result.Success(getCompleted())
-        )
+        if (throwable == null) {
+            listenableFuture.complete(getCompleted())
+        } else {
+            listenableFuture.completeExceptionally(throwable)
+        }
     }
     return listenableFuture
 }
@@ -303,11 +305,11 @@ private class ListenableFutureCoroutine<T>(
     val future = JobListenableFuture<T>(this)
 
     override fun onCompleted(value: T) {
-        future.complete(Result.Success(value))
+        future.complete(value)
     }
 
     override fun onCancelled(cause: Throwable, handled: Boolean) {
-        if (!future.complete(cause.asResult()) && !handled) {
+        if (!future.completeExceptionally(cause) && !handled) {
             // prevents loss of exception that was not handled by parent & could not be set to JobListenableFuture
             handleCoroutineException(context, cause)
         }
@@ -344,11 +346,25 @@ private class JobListenableFuture<T>(private val jobToCancel: Job): ListenableFu
     private val auxFuture = SettableFuture.create<Result<T>>()
 
     /**
-     * When the attached coroutine [isCompleted][Job.isCompleted], its [Result] should be passed to this method.
+     * When the attached coroutine [isCompleted][Job.isCompleted] successfully
+     * its outcome should be passed to this method.
      *
      * This should succeed barring a race with external cancellation.
      */
-    fun complete(result: Result<T>) = auxFuture.set(result)
+    fun complete(result: T) = auxFuture.set(Result.Success(result))
+
+    /**
+     * When the attached coroutine [isCompleted][Job.isCompleted] [exceptionally][Job.isCancelled]
+     * its outcome should be passed to this method.
+     *
+     * This method will map coroutine's exception into corresponding Future's exception.
+     *
+     * This should succeed barring a race with external cancellation.
+     */
+    // CancellationException is wrapped into `Result.Cancellation` to preserve original cause and message.
+    // All the other exceptions are delegated to SettableFuture.setException.
+    fun completeExceptionally(t: Throwable) =
+        if (t is CancellationException) auxFuture.set(Result.Cancellation(t)) else auxFuture.setException(t)
 
     /**
      * Returns cancellation _in the sense of [Future]_. This is _not_ equivalent to
@@ -393,7 +409,7 @@ private class JobListenableFuture<T>(private val jobToCancel: Job): ListenableFu
     /** See [get()]. */
     private fun getInternal(result: Result<T>): T = when(result) {
         is Result.Success -> result.value
-        is Result.Failure -> throw result.exception
+        is Result.Cancellation -> throw CancellationException().initCause(result.exception)
     }
 
     override fun addListener(listener: Runnable, executor: Executor) {
@@ -433,26 +449,18 @@ private class JobListenableFuture<T>(private val jobToCancel: Job): ListenableFu
  *
  * - When coroutine [isCompleted][Job.isCompleted] successfully, its result is wrapped into [Success].
  * - When coroutine [isCompleted][Job.isCompleted] exceptionally, meaning [isCancelled]
- *   returns `true`, the result is represented by [Failure] state. According to [Future]'s contract,
- *   [Failure.exception] can be of two types:
+ *   returns `true`. According to [Future]'s contract, the exception can be of two types:
  *     - [CancellationException] if the coroutine was _cancelled normally_, meaning it threw [CancellationException].
+ *       In this case the exception is wrapped into [Result.Cancellation].
  *     - [ExecutionException] with the original [Throwable] in its [cause][ExecutionException.cause] otherwise.
+ *       This case is handled separately. See [JobListenableFuture.completeExceptionally].
  */
 private sealed class Result<out T> {
     /** Returns cancellation _in the sense of [Future]_. This is _not_ equivalent to [Job.isCancelled] */
     open val isCancelled get() = false
 
     class Success<T>(val value: T) : Result<T>()
-    class Failure<T>(val exception: Exception) : Result<T>() {
-        override val isCancelled: Boolean get() = exception is CancellationException
+    class Cancellation<T>(val exception: CancellationException) : Result<T>() {
+        override val isCancelled get() = true
     }
 }
-
-/**
- * Wraps `this` Exception thrown from a coroutine into [Result.Failure]. [Result.Failure.exception] represents `this`
- * exception in the sense of [Future].
- */
-private fun <T> Throwable.asResult() = Result.Failure<T>(
-    if (this is CancellationException) this
-    else ExecutionException(this)
-)

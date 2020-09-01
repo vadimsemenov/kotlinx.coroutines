@@ -356,9 +356,11 @@ class ListenableFutureTest : TestBase() {
 
         val outputCancellationException =
           assertFailsWith<CancellationException> { asFuture.get() }
-        assertEquals(outputCancellationException.message, "Foobar")
-        assertTrue(outputCancellationException.cause is OutOfMemoryError)
-        assertEquals(outputCancellationException.cause?.message, "Foobaz")
+        val cause = outputCancellationException.cause
+        assertNotNull(cause)
+        assertEquals(cause.message, "Foobar")
+        assertTrue(cause.cause is OutOfMemoryError)
+        assertEquals(cause.cause?.message, "Foobaz")
     }
 
     @Test
@@ -592,8 +594,11 @@ class ListenableFutureTest : TestBase() {
         assertTrue(future.isDone)
         assertTrue(future.isCancelled)
         val thrown = assertFailsWith<CancellationException> { future.get() }
-        assertEquals("Parent cancelled", thrown.message)
-        assertTrue(thrown.cause is TestException)
+        val cause = thrown.cause
+        assertNotNull(cause)
+        assertTrue(cause is CancellationException)
+        assertEquals("Parent cancelled", cause.message)
+        assertTrue(cause.cause is TestException)
         finish(5)
     }
 
